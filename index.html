@@ -30,10 +30,10 @@
     <img id="videoFeed" alt="Processed video will appear here" />
   </div>
 
-  <div class="projects-section">
+  <div class="projects-section" style="cursor:pointer">
     <h2>More such computer vision projects</h2>
-    <video id="bgVideo" autoplay loop muted playsinline>
-      <source src="output2.mp4" type="video/mp4">
+    <video id="bgVideo" loop muted playsinline controls>
+      <source src="./output3.mp4" type="video/mp4">
       Your browser does not support the video tag.
     </video>
     <p id="videoStatus" style="color:#ff6b6b;margin-top:10px"></p>
@@ -90,6 +90,11 @@
       
       bgVideo.addEventListener('canplay', () => {
         console.log('Video can start playing!');
+      });
+      
+      // Play video when section is clicked
+      document.querySelector('.projects-section').addEventListener('click', () => {
+        bgVideo.play();
       });
     });
 
@@ -192,3 +197,6 @@
   </script>
 </body>
 </html>
+
+
+
