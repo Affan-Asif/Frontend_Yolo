@@ -6,12 +6,12 @@
   <title>YOLOv11 - Frontend</title>
   <style>
     body{font-family:Arial, sans-serif;background:#111;color:#fff;text-align:center;padding:20px}
-    #videoFeed{width:80%;max-width:800px;border-radius:8px;border:3px solid #00ffcc;margin:20px auto;display:block}
-    #localVideo{width:80%;max-width:800px;border-radius:8px;border:3px solid #ff00ff;margin:20px auto;display:none}
+    #displayCanvas{width:80%;max-width:800px;border-radius:8px;border:3px solid #00ffcc;margin:20px auto;display:none}
+    #localVideo{display:none}
     button{padding:10px 18px;margin:8px;border-radius:8px;border:none;background:#00ffcc;color:#000;cursor:pointer;font-size:16px}
     button:disabled{background:#666;cursor:not-allowed}
     .status{margin:10px;padding:10px;border-radius:8px;background:#222}
-    canvas{display:none}
+    #procCanvas{display:none}
     .projects-section{margin-top:60px;padding:20px}
     .projects-section h2{color:#00ffcc;margin-bottom:20px;font-size:28px;text-shadow:0 0 10px rgba(0,255,204,0.5)}
     #bgVideo{width:80%;max-width:900px;border-radius:12px;border:3px solid #00ffcc;box-shadow:0 0 20px rgba(0,255,204,0.3);margin:20px auto;display:block}
@@ -19,15 +19,15 @@
 </head>
 <body>
   <h1>Computer Vision Project</h1>
-  <p class="status" id="status">Ready to start</p>
+  <p class="status" id="status">Loading YOLOv11 model...</p>
   <p>
-    <button id="startBtn">Start Camera</button>
+    <button id="startBtn" disabled>Start Camera</button>
     <button id="stopBtn" disabled>Stop Camera</button>
   </p>
 
   <div>
-    <video id="localVideo" autoplay playsinline></video>
-    <img id="videoFeed" alt="Processed video will appear here" />
+    <video id="localVideo" autoplay playsinline muted></video>
+    <canvas id="displayCanvas"></canvas>
   </div>
 
   <div class="projects-section" style="cursor:pointer">
@@ -39,164 +39,160 @@
     <p id="videoStatus" style="color:#ff6b6b;margin-top:10px"></p>
   </div>
 
-  <canvas id="canvas"></canvas>
+  <canvas id="procCanvas" width="640" height="640"></canvas>
 
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
   <script>
-    const BACKEND = "https://aging-diagram-professionals-viewers.trycloudflare.com";
-    
+    const MODEL_URL = "./yolo11n.onnx";
+    const INPUT_SIZE = 640;
+    const CONF_THRESHOLD = 0.5;
+    const IOU_THRESHOLD = 0.45;
+
+    const CLASSES = ["person","bicycle","car","motorcycle","airplane","bus","train","truck","boat","traffic light","fire hydrant","stop sign","parking meter","bench","bird","cat","dog","horse","sheep","cow","elephant","bear","zebra","giraffe","backpack","umbrella","handbag","tie","suitcase","frisbee","skis","snowboard","sports ball","kite","baseball bat","baseball glove","skateboard","surfboard","tennis racket","bottle","wine glass","cup","fork","knife","spoon","bowl","banana","apple","sandwich","orange","broccoli","carrot","hot dog","pizza","donut","cake","chair","couch","potted plant","bed","dining table","toilet","tv","laptop","mouse","remote","keyboard","cell phone","microwave","oven","toaster","sink","refrigerator","book","clock","vase","scissors","teddy bear","hair drier","toothbrush"];
+
+    let session = null;
     let localStream = null;
     let isProcessing = false;
-    let videoElement, canvas, ctx, imgElement;
 
-    window.addEventListener('DOMContentLoaded', () => {
-      videoElement = document.getElementById('localVideo');
-      canvas = document.getElementById('canvas');
-      ctx = canvas.getContext('2d');
-      imgElement = document.getElementById('videoFeed');
-      
-      document.getElementById("startBtn").addEventListener("click", startCamera);
-      document.getElementById("stopBtn").addEventListener("click", stopCamera);
-      
-      // Debug background video
-      const bgVideo = document.getElementById('bgVideo');
-      const videoStatus = document.getElementById('videoStatus');
-      
-      bgVideo.addEventListener('loadstart', () => {
-        console.log('Video loading started...');
-        videoStatus.textContent = 'Loading video...';
-      });
-      
-      bgVideo.addEventListener('loadeddata', () => {
-        console.log('Video data loaded!');
-        videoStatus.textContent = 'Video loaded successfully!';
-        setTimeout(() => videoStatus.textContent = '', 2000);
-      });
-      
-      bgVideo.addEventListener('error', (e) => {
-        console.error('Video error:', bgVideo.error);
-        let errorMsg = 'Video failed to load. ';
-        if (bgVideo.error) {
-          switch(bgVideo.error.code) {
-            case 1: errorMsg += 'MEDIA_ERR_ABORTED - Video loading was aborted'; break;
-            case 2: errorMsg += 'MEDIA_ERR_NETWORK - Network error while loading video'; break;
-            case 3: errorMsg += 'MEDIA_ERR_DECODE - Video decoding error'; break;
-            case 4: errorMsg += 'MEDIA_ERR_SRC_NOT_SUPPORTED - Video format not supported'; break;
-            default: errorMsg += 'Unknown error';
-          }
-        }
-        videoStatus.textContent = errorMsg;
-        console.log('Video source:', bgVideo.currentSrc);
-      });
-      
-      bgVideo.addEventListener('canplay', () => {
-        console.log('Video can start playing!');
-      });
-      
-      // Play video when section is clicked
-      document.querySelector('.projects-section').addEventListener('click', () => {
-        bgVideo.play();
-      });
-    });
+    const video = document.getElementById("localVideo");
+    const displayCanvas = document.getElementById("displayCanvas");
+    const displayCtx = displayCanvas.getContext("2d");
+    const procCanvas = document.getElementById("procCanvas");
+    const procCtx = procCanvas.getContext("2d", { willReadFrequently: true });
+    const statusEl = document.getElementById("status");
 
-    async function startCamera() {
+    async function loadModel() {
       try {
-        updateStatus('Requesting camera access...');
-        
-        // Request access to the user's local camera
-        localStream = await navigator.mediaDevices.getUserMedia({ 
-          video: { 
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            facingMode: 'user' 
-          } 
+        session = await ort.InferenceSession.create(MODEL_URL, {
+          executionProviders: ["wasm"]
         });
-        
-        videoElement.srcObject = localStream;
-        videoElement.style.display = 'block';
-        imgElement.style.display = 'none';
-        
-        updateStatus('Camera started. Processing frames...');
-        isProcessing = true;
-        
-        // Enable/disable buttons
-        document.getElementById('startBtn').disabled = true;
-        document.getElementById('stopBtn').disabled = false;
-        
-        // Start sending frames to backend
-        sendFramesToBackend();
-        
-      } catch (err) {
-        updateStatus('Error: ' + err.message);
-        console.error('Camera access error:', err);
-        alert('Failed to access camera. Please allow camera permissions.');
+        statusEl.textContent = "Model loaded - ready to start";
+        document.getElementById("startBtn").disabled = false;
+      } catch (e) {
+        statusEl.textContent = "Failed to load model: " + e.message;
       }
     }
 
-    async function sendFramesToBackend() {
-      if (!isProcessing) return;
-      
-      // Capture frame from video element
-      canvas.width = videoElement.videoWidth;
-      canvas.height = videoElement.videoHeight;
-      ctx.drawImage(videoElement, 0, 0);
-      
-      // Convert canvas to blob
-      canvas.toBlob(async (blob) => {
-        if (!isProcessing) return;
-        
-        try {
-          const formData = new FormData();
-          formData.append('frame', blob, 'frame.jpg');
-          
-          const response = await fetch(`${BACKEND}/process_frame`, {
-            method: 'POST',
-            body: formData
-          });
-          
-          if (response.ok) {
-            const result = await response.json();
-            if (result.processed_frame) {
-              // Display the processed frame
-              imgElement.src = 'data:image/jpeg;base64,' + result.processed_frame;
-              imgElement.style.display = 'block';
-              videoElement.style.display = 'none';
-            }
-          }
-        } catch (err) {
-          console.error('Frame processing error:', err);
-        }
-        
-        // Continue processing
-        if (isProcessing) {
-          setTimeout(() => sendFramesToBackend(), 100); // ~10 FPS
-        }
-      }, 'image/jpeg', 0.8);
+    async function startCamera() {
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      video.srcObject = localStream;
+      await video.play();
+      displayCanvas.width = video.videoWidth;
+      displayCanvas.height = video.videoHeight;
+      displayCanvas.style.display = "block";
+      isProcessing = true;
+      document.getElementById("startBtn").disabled = true;
+      document.getElementById("stopBtn").disabled = false;
+      statusEl.textContent = "Detecting...";
+      detectLoop();
     }
 
     function stopCamera() {
       isProcessing = false;
-      
-      if (localStream) {
-        localStream.getTracks().forEach(track => track.stop());
-        localStream = null;
-      }
-      
-      videoElement.srcObject = null;
-      videoElement.style.display = 'none';
-      imgElement.src = '';
-      imgElement.style.display = 'none';
-      
-      updateStatus('Camera stopped');
-      document.getElementById('startBtn').disabled = false;
-      document.getElementById('stopBtn').disabled = true;
+      if (localStream) localStream.getTracks().forEach(t => t.stop());
+      displayCanvas.style.display = "none";
+      document.getElementById("startBtn").disabled = false;
+      document.getElementById("stopBtn").disabled = true;
+      statusEl.textContent = "Stopped";
     }
 
-    function updateStatus(message) {
-      document.getElementById('status').textContent = message;
+    function preprocess() {
+      // Letterbox the frame into 640x640
+      const vw = video.videoWidth, vh = video.videoHeight;
+      const scale = Math.min(INPUT_SIZE / vw, INPUT_SIZE / vh);
+      const nw = Math.round(vw * scale), nh = Math.round(vh * scale);
+      const dx = (INPUT_SIZE - nw) / 2, dy = (INPUT_SIZE - nh) / 2;
+
+      procCtx.fillStyle = "#727272";
+      procCtx.fillRect(0, 0, INPUT_SIZE, INPUT_SIZE);
+      procCtx.drawImage(video, dx, dy, nw, nh);
+
+      const { data } = procCtx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE);
+      const n = INPUT_SIZE * INPUT_SIZE;
+      const float = new Float32Array(3 * n);
+      for (let i = 0; i < n; i++) {
+        float[i] = data[i * 4] / 255;          // R
+        float[n + i] = data[i * 4 + 1] / 255;  // G
+        float[2 * n + i] = data[i * 4 + 2] / 255; // B
+      }
+      return { tensor: new ort.Tensor("float32", float, [1, 3, INPUT_SIZE, INPUT_SIZE]), scale, dx, dy };
     }
+
+    function iou(a, b) {
+      const x1 = Math.max(a.x1, b.x1), y1 = Math.max(a.y1, b.y1);
+      const x2 = Math.min(a.x2, b.x2), y2 = Math.min(a.y2, b.y2);
+      const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+      const areaA = (a.x2 - a.x1) * (a.y2 - a.y1);
+      const areaB = (b.x2 - b.x1) * (b.y2 - b.y1);
+      return inter / (areaA + areaB - inter);
+    }
+
+    function postprocess(output, scale, dx, dy) {
+      // output: [1, 84, 8400] -> 4 box coords + 80 class scores
+      const data = output.data;
+      const numDet = output.dims[2];
+      const numClasses = output.dims[1] - 4;
+      let boxes = [];
+      for (let i = 0; i < numDet; i++) {
+        let best = 0, cls = -1;
+        for (let c = 0; c < numClasses; c++) {
+          const s = data[(4 + c) * numDet + i];
+          if (s > best) { best = s; cls = c; }
+        }
+        if (best < CONF_THRESHOLD) continue;
+        const cx = data[i], cy = data[numDet + i];
+        const w = data[2 * numDet + i], h = data[3 * numDet + i];
+        boxes.push({
+          x1: (cx - w / 2 - dx) / scale,
+          y1: (cy - h / 2 - dy) / scale,
+          x2: (cx + w / 2 - dx) / scale,
+          y2: (cy + h / 2 - dy) / scale,
+          score: best, cls
+        });
+      }
+      // NMS
+      boxes.sort((a, b) => b.score - a.score);
+      const kept = [];
+      for (const box of boxes) {
+        if (kept.every(k => k.cls !== box.cls || iou(k, box) < IOU_THRESHOLD)) kept.push(box);
+      }
+      return kept;
+    }
+
+    function drawBoxes(boxes) {
+      displayCtx.drawImage(video, 0, 0, displayCanvas.width, displayCanvas.height);
+      displayCtx.lineWidth = 3;
+      displayCtx.font = "16px Arial";
+      for (const b of boxes) {
+        displayCtx.strokeStyle = "#00ffcc";
+        displayCtx.strokeRect(b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1);
+        const label = `${CLASSES[b.cls]} ${(b.score * 100).toFixed(0)}%`;
+        const tw = displayCtx.measureText(label).width + 8;
+        displayCtx.fillStyle = "#00ffcc";
+        displayCtx.fillRect(b.x1, b.y1 - 22, tw, 22);
+        displayCtx.fillStyle = "#000";
+        displayCtx.fillText(label, b.x1 + 4, b.y1 - 6);
+      }
+    }
+
+    async function detectLoop() {
+      if (!isProcessing) return;
+      const { tensor, scale, dx, dy } = preprocess();
+      const results = await session.run({ [session.inputNames[0]]: tensor });
+      const boxes = postprocess(results[session.outputNames[0]], scale, dx, dy);
+      drawBoxes(boxes);
+      requestAnimationFrame(detectLoop);
+    }
+
+    window.addEventListener("DOMContentLoaded", () => {
+      document.getElementById("startBtn").addEventListener("click", startCamera);
+      document.getElementById("stopBtn").addEventListener("click", stopCamera);
+      loadModel();
+
+      const bgVideo = document.getElementById("bgVideo");
+      const videoStatus = document.getElementById("videoStatus");
+      bgVideo.addEventListener("error", () => { videoStatus.textContent = "Video failed to load"; });
+    });
   </script>
 </body>
 </html>
-
-
-
